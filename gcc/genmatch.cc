@@ -217,9 +217,56 @@ fp_decl_done (FILE *f, const char *trailer)
     fprintf (header_file, "%s;", trailer);
 }
 
+/* Line numbers for use by indirect line directives.  */
+static vec<int> dbg_line_numbers;
+
+static void
+write_header_declarations (bool gimple, FILE *f)
+{
+  fprintf (f, "\nextern void\n%s_dump_logs (const char *file1, int line1_id, "
+	      "const char *file2, int line2, bool simplify);\n",
+	      gimple ? "gimple" : "generic");
+}
+
+static void
+define_dbg_line_numbers (bool gimple, FILE *f)
+{
+
+  if (dbg_line_numbers.is_empty ())
+    {
+      fprintf (f, "};\n\n");
+      return;
+    }
+
+  fprintf (f , "void\n%s_dump_logs (const char *file1, int line1_id,"
+		"const char *file2, int line2, bool simplify)\n{\n",
+		gimple ? "gimple" : "generic");
+
+  fprintf_indent (f, 2, "static int __dbg_line_numbers[%d] = {",
+		  dbg_line_numbers.length ());
+
+  for (int i = 0; i < (int)dbg_line_numbers.length () - 1; i++)
+    {
+      if (i % 20 == 0)
+	fprintf (f, "\n\t");
+
+      fprintf (f, "%d, ", dbg_line_numbers[i]);
+    }
+  fprintf (f, "%d\n  };\n\n", dbg_line_numbers.last ());
+
+
+  fprintf_indent (f, 2, "fprintf (dump_file, \"%%s "
+		  "%%s: __dbg_line_numbers[%%d], %%s:%%d\\n\",\n");
+  fprintf_indent (f, 10, "simplify ? \"Applying pattern\" : "
+		  "\"Matching expression\", file1, line1_id, file2, line2);");
+
+  fprintf (f, "\n}\n\n");
+}
+
 static void
 output_line_directive (FILE *f, location_t location,
-		       bool dumpfile = false, bool fnargs = false)
+		      bool dumpfile = false, bool fnargs = false,
+		      bool indirect_line_numbers = false)
 {
   const line_map_ordinary *map;
   linemap_resolve_location (line_table, location, LRK_SPELLING_LOCATION, &map);
@@ -239,7 +286,15 @@ output_line_directive (FILE *f, location_t location,
 	++file;
 
       if (fnargs)
-	fprintf (f, "\"%s\", %d", file, loc.line);
+  {
+  if (indirect_line_numbers)
+    {
+      fprintf (f, "\"%s\", %d", file, dbg_line_numbers.length ());
+      dbg_line_numbers.safe_push (loc.line);
+    }
+  else
+    fprintf (f, "\"%s\", %d", file, loc.line);
+  }
       else
 	fprintf (f, "%s:%d", file, loc.line);
     }
@@ -3375,20 +3430,19 @@ dt_operand::gen (FILE *f, int indent, bool gimple, int depth)
     }
 }
 
-/* Emit a fprintf to the debug file to the file F, with the INDENT from
+/* Emit a logging call to the debug file to the file F, with the INDENT from
    either the RESULT location or the S's match location if RESULT is null. */
 static void
-emit_debug_printf (FILE *f, int indent, class simplify *s, operand *result)
+emit_logging_call (FILE *f, int indent, class simplify *s, operand *result,
+				  bool gimple)
 {
   fprintf_indent (f, indent, "if (UNLIKELY (debug_dump)) "
-	   "fprintf (dump_file, \"%s ",
-	   s->kind == simplify::SIMPLIFY
-	   ? "Applying pattern" : "Matching expression");
-  fprintf (f, "%%s:%%d, %%s:%%d\\n\", ");
+	   "%s_dump_logs (", gimple ? "gimple" : "generic");
   output_line_directive (f,
-			 result ? result->location : s->match->location, true,
-			 true);
-  fprintf (f, ", __FILE__, __LINE__);\n");
+			result ? result->location : s->match->location,
+			true, true, true);
+  fprintf (f, ", __FILE__, __LINE__, %s);\n",
+	      s->kind == simplify::SIMPLIFY ? "true" : "false");
 }
 
 /* Generate code for the '(if ...)', '(with ..)' and actual transform
@@ -3524,7 +3578,7 @@ dt_simplify::gen_1 (FILE *f, int indent, bool gimple, operand *result)
   if (!result)
     {
       /* If there is no result then this is a predicate implementation.  */
-      emit_debug_printf (f, indent, s, result);
+      emit_logging_call (f, indent, s, result, gimple);
       fprintf_indent (f, indent, "return true;\n");
     }
   else if (gimple)
@@ -3615,7 +3669,7 @@ dt_simplify::gen_1 (FILE *f, int indent, bool gimple, operand *result)
 	}
       else
 	gcc_unreachable ();
-      emit_debug_printf (f, indent, s, result);
+      emit_logging_call (f, indent, s, result, gimple);
       fprintf_indent (f, indent, "return true;\n");
     }
   else /* GENERIC */
@@ -3670,7 +3724,7 @@ dt_simplify::gen_1 (FILE *f, int indent, bool gimple, operand *result)
 	    }
 	  if (is_predicate)
 	    {
-	      emit_debug_printf (f, indent, s, result);
+	      emit_logging_call (f, indent, s, result, gimple);
 	      fprintf_indent (f, indent, "return true;\n");
 	    }
 	  else
@@ -3738,7 +3792,7 @@ dt_simplify::gen_1 (FILE *f, int indent, bool gimple, operand *result)
 				  i);
 		}
 	    }
-	  emit_debug_printf (f, indent, s, result);
+	  emit_logging_call (f, indent, s, result, gimple);
 	  fprintf_indent (f, indent, "return _r;\n");
 	}
     }
@@ -5447,6 +5501,7 @@ main (int argc, char **argv)
       parts.quick_push (stdout);
       write_header (stdout, s_include_file);
       write_header_includes (gimple, stdout);
+      write_header_declarations (gimple, stdout);
     }
   else
     {
@@ -5460,6 +5515,7 @@ main (int argc, char **argv)
       fprintf (header_file, "#ifndef GCC_GIMPLE_MATCH_AUTO_H\n"
 			    "#define GCC_GIMPLE_MATCH_AUTO_H\n");
       write_header_includes (gimple, header_file);
+      write_header_declarations (gimple, header_file);
     }
 
   /* Go over all predicates defined with patterns and perform
@@ -5501,6 +5557,8 @@ main (int argc, char **argv)
     dt.print (stderr);
 
   dt.gen (parts, gimple);
+
+  define_dbg_line_numbers (gimple, choose_output (parts));
 
   for (FILE *f : parts)
     {
